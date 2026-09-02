@@ -349,9 +349,10 @@ function parseAssetFilename(fn){
     m = base.match(/^CB[_\- ]?0*(\d+)/i);
     if (m) return { chapter: parseInt(m[1],10), kind: 'PDF', isRA:false, isWB:false, ext:lowerExt, num:1, filename: fn };
 
-    // Any other PDF starting with a chapter number (not flagged Work Book/Course Book above) is
-    // treated as the Course Book PDF, regardless of what follows: "1.pdf", "9_Drama_Kids.pdf", etc.
-    m = base.match(/^0*(\d+)/);
+    // Any other PDF starting with a short chapter number (not flagged Work Book/Course Book above)
+    // is treated as the Course Book PDF, regardless of what follows: "1.pdf", "9_Drama_Kids.pdf", etc.
+    // Capped at 3 digits so a long numeric ID (e.g. a 13-digit asset ID) isn't mistaken for a chapter number.
+    m = base.match(/^0*(\d{1,3})(?!\d)/);
     if (m) return { chapter: parseInt(m[1],10), kind: 'PDF', isRA:false, isWB:false, ext:lowerExt, num:1, filename: fn };
 
     // "Ch1.pdf" / "Chapter-01.pdf" style course-book PDF (doesn't start with a bare number)
@@ -684,22 +685,68 @@ document.getElementById('mergeBtn').addEventListener('click', ()=>{
 
   // Skip report: filenames that parsed fine but were never used, plus filenames that
   // didn't match any known naming pattern at all
-  const recognizedButUnused = state.assetFilenames.filter(fn => {
+  let recognizedButUnused = state.assetFilenames.filter(fn => {
     const p = parseAssetFilename(fn);
     return p && !result.usedFilenames.has(fn);
   });
-  const totalSkipped = unrecognized.length + recognizedButUnused.length;
+  let unrecognizedRemaining = unrecognized.slice();
+
+  // Orphan PDFs: no chapter number pattern at all, or a chapter number with no matching
+  // chapter row in the file. These get a brand-new chapter created, named after the PDF
+  // itself, with the PDF filed as that chapter's Course Book.
+  function deriveChapterName(fn){
+    let base = fn.replace(/\.[a-zA-Z0-9]+$/, '');
+    base = base.replace(/^\d{4,}_/, ''); // strip a long numeric asset ID prefix
+    base = base.replace(/_/g, ' ').trim();
+    return base || fn;
+  }
+  const orphanFromUnrecognized = unrecognizedRemaining.filter(fn => fn.toLowerCase().endsWith('.pdf'));
+  const orphanFromNoChapterMatch = recognizedButUnused.filter(fn => {
+    const p = parseAssetFilename(fn);
+    return p && p.kind==='PDF' && !chapterSeqsInFile.has(p.chapter);
+  });
+  const orphanPdfs = [...orphanFromUnrecognized, ...orphanFromNoChapterMatch];
+
+  let chaptersCreated = 0;
+  if (orphanPdfs.length){
+    let nextSeq = chapterSeqsInFile.size ? Math.max(...chapterSeqsInFile) + 1 : 1;
+    for (const fn of orphanPdfs){
+      const chapterName = deriveChapterName(fn);
+      const newChapterRow = new Array(idx.rowType>=0 ? state.targetRows[0].length : result.header.length).fill('');
+      newChapterRow[idx.rowType] = 'chapter';
+      if (idx.sequence>=0) newChapterRow[idx.sequence] = String(nextSeq);
+      if (idx.name>=0) newChapterRow[idx.name] = chapterName;
+      const boolCaseGuess = detectBoolCase(state.targetRows.slice(1), idx.isCourseBook>=0?idx.isCourseBook:idx.isVisibleInPageButton);
+      const F = boolCaseGuess==='lower' ? 'false' : 'FALSE';
+      if (idx.isAllowToDemo>=0) newChapterRow[idx.isAllowToDemo] = F;
+      if (idx.isCourseBook>=0) newChapterRow[idx.isCourseBook] = F;
+      if (idx.isWorkBook>=0) newChapterRow[idx.isWorkBook] = F;
+      if (idx.isConvertToTopic>=0) newChapterRow[idx.isConvertToTopic] = F;
+      if (idx.isRemove>=0) newChapterRow[idx.isRemove] = F;
+      state.mergedRows.push(newChapterRow);
+      state.mergedRows.push(buildNewRow(newChapterRow.length, idx, boolCaseGuess, 'Course Book', pdfGroupName, pdfPathPrefix+fn, {isCourseBook:true}));
+      chapterSeqsInFile.add(nextSeq);
+      nextSeq++;
+      chaptersCreated++;
+    }
+    // these filenames are now used — drop them from the skip lists
+    unrecognizedRemaining = unrecognizedRemaining.filter(fn => !orphanFromUnrecognized.includes(fn));
+    recognizedButUnused = recognizedButUnused.filter(fn => !orphanFromNoChapterMatch.includes(fn));
+  }
+
+  const totalSkipped = unrecognizedRemaining.length + recognizedButUnused.length;
 
   document.getElementById('mergeSummary').innerHTML =
     `<p class="summary-line"><b>${result.stats.chaptersMatched}</b> chapters matched (` +
-    `<b>${result.stats.chaptersCourseBookAdded}</b> new Course Book rows, <b>${result.stats.chaptersWorkBookAdded}</b> new Work Book rows) · rows ${state.targetRows.length-1} → <b>${result.rows.length-1}</b></p>` +
+    `<b>${result.stats.chaptersCourseBookAdded}</b> new Course Book rows, <b>${result.stats.chaptersWorkBookAdded}</b> new Work Book rows` +
+    `${chaptersCreated ? `, <b>${chaptersCreated}</b> new chapters created for orphan PDFs` : ''}) · rows ${state.targetRows.length-1} → <b>${state.mergedRows.length-1}</b></p>` +
     `<p class="summary-line">${totalSkipped>0 ? `⚠ <b>${totalSkipped}</b> asset files skipped` : '✓ no asset files skipped'}</p>`;
 
   const skipBox = document.getElementById('skipList');
   if (totalSkipped>0){
     skipBox.style.display='block';
     skipBox.innerHTML = [
-      ...unrecognized.map(fn=>`<div class="issue-row"><span class="ch">?</span><span>unrecognized filename pattern</span><span>${escapeHtml(fn)}</span></div>`),
+      ...unrecognizedRemaining.map(fn=>`<div class="issue-row"><span class="ch">?</span><span>unrecognized filename pattern</span><span>${escapeHtml(fn)}</span></div>`),
       ...recognizedButUnused.map(fn=>{
         const p = parseAssetFilename(fn);
         return `<div class="issue-row"><span class="ch">Ch ${p.chapter}</span><span>${skipReason(p.chapter)}</span><span>${escapeHtml(fn)}</span></div>`;
@@ -710,10 +757,15 @@ document.getElementById('mergeBtn').addEventListener('click', ()=>{
     skipBox.innerHTML='';
   }
 
-  // build chapter shelf, reading original chapter list (name+sequence) from target
+  // build chapter shelf, reading final chapter list (name+sequence) from the merged output
+  // so newly created orphan chapters show up too
   const chapters = [];
-  for (const row of state.targetRows.slice(1)) {
+  for (const row of state.mergedRows.slice(1)) {
     if ((row[idx.rowType]||'').trim()==='chapter') chapters.push({ seq: parseInt(row[idx.sequence],10), name: row[idx.name] });
+  }
+  const originalChapterSeqs = new Set();
+  for (const row of state.targetRows.slice(1)) {
+    if ((row[idx.rowType]||'').trim()==='chapter') originalChapterSeqs.add(parseInt(row[idx.sequence],10));
   }
   const shelf = document.getElementById('shelf');
   shelf.innerHTML = '';
@@ -721,7 +773,9 @@ document.getElementById('mergeBtn').addEventListener('click', ()=>{
     const detail = result.stats.chapterDetail[ch.seq];
     const div = document.createElement('div');
     let cls='none', pillHtml='<span class="pill none">no assets found</span>', counts='';
-    if (detail) {
+    if (!originalChapterSeqs.has(ch.seq)) {
+      cls='ok'; pillHtml='<span class="pill ok">new chapter</span><span class="pill ok">+ course book</span>'; counts='';
+    } else if (detail) {
       const hasGap = detail.acNums.length>0 && (detail.acNums[0]!==1 || detail.acNums.some((n,i)=>i>0 && n!==detail.acNums[i-1]+1));
       cls = hasGap ? 'gap' : 'ok';
       pillHtml = hasGap ? '<span class="pill gap">numbering gap</span>' : '<span class="pill ok">matched</span>';
