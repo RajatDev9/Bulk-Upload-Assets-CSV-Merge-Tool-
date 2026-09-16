@@ -468,7 +468,8 @@ function buildNewRow(colCount, idx, boolCase, name, groupName, url, opts){
   // isCourseBook/isWorkBook. Derived from the same opts so callers don't need to change.
   if (idx.bookType>=0) row[idx.bookType] = opts.isWorkBook ? 'Workbook' : 'Coursebook';
   if (idx.isMainPdf>=0) row[idx.isMainPdf] = (opts.isCourseBook || opts.isWorkBook) ? T : F;
-  if (idx.openInMainContent>=0) row[idx.openInMainContent] = (opts.isCourseBook || opts.isWorkBook) ? T : F;
+  if (idx.openInMainContent>=0) row[idx.openInMainContent] = /\.pdf$/i.test(url||'') ? T : F;
+  if (idx.sequence>=0 && opts.sequence != null) row[idx.sequence] = String(opts.sequence);
   if (idx.isVisibleInPageButton>=0) row[idx.isVisibleInPageButton]=F;
   if (idx.isConvertToTopic>=0) row[idx.isConvertToTopic]=F;
   if (idx.isRemove>=0) row[idx.isRemove]=F;
@@ -495,10 +496,14 @@ function mergeAssets(csvRows, byChapter, opts){
     return basePrefix + noExt + '/index.html';
   }
 
-  // Pass 1: which chapters already have Course Book / Work Book rows.
+  // Pass 1: which chapters already have Course Book / Work Book / Teacher Manual / Worksheet rows.
   // A chapter with a "Course Book" row already present is treated as finalized — don't touch it.
+  // Teacher Manual / Worksheet are tracked separately so a repeat TM_/WS_ file doesn't duplicate
+  // an entry that's already there, even for chapters that do get touched for other reasons.
   const hasCourseBook = new Set();
   const hasWorkBook = new Set();
+  const hasTeacherManual = new Set();
+  const hasWorksheet = new Set();
   {
     let cur = null;
     for (let r=1;r<csvRows.length;r++){
@@ -509,68 +514,82 @@ function mergeAssets(csvRows, byChapter, opts){
         const nm = (row[idx.name]||'').trim();
         if (nm==='Course Book') hasCourseBook.add(cur);
         if (nm==='Work Book') hasWorkBook.add(cur);
+        if (nm==='Teacher Manual' || nm.startsWith('Teacher Manual -')) hasTeacherManual.add(cur);
+        if (nm==='Worksheet' || nm.startsWith('Worksheet -')) hasWorksheet.add(cur);
       }
     }
 
   }
 
-  function insertChapterAssetRows(out, d){
+  function insertChapterAssetRows(out, d, chapter, seqCounter){
     const vids = d.VID;
-    if (vids.length===1) out.push(buildNewRow(header.length,idx,boolCase,'Animation','Animation',prefix+vids[0].filename));
-    else for (const v of vids) out.push(buildNewRow(header.length,idx,boolCase,`Animation - ${v.num}`,'Animation',prefix+v.filename));
-    for (const ra of d.VID_RA) out.push(buildNewRow(header.length,idx,boolCase,'Read Aloud','Read aloud',prefix+ra.filename));
-    d.AC.forEach((ac,i)=>{
-      const label = opts.renumberSequential ? `Interactivity - ${i+1}` : `Interactivity - ${ac.num}`;
-      out.push(buildNewRow(header.length,idx,boolCase,label,'Activity',interactivityUrl(prefix,ac.filename)));
-      usedFilenames.add(ac.filename);
-    });
-    // Listening Text / Study Skill always come after Interactivity
+    if (vids.length===1) out.push(buildNewRow(header.length,idx,boolCase,'Animation','Animation',prefix+vids[0].filename,{sequence:seqCounter.next()}));
+    else for (const v of vids) out.push(buildNewRow(header.length,idx,boolCase,`Animation - ${v.num}`,'Animation',prefix+v.filename,{sequence:seqCounter.next()}));
+    for (const ra of d.VID_RA) out.push(buildNewRow(header.length,idx,boolCase,'Read Aloud','Read aloud',prefix+ra.filename,{sequence:seqCounter.next()}));
+    // Listening Text comes after Read Aloud, before Interactivity
     d.LTX.forEach((ltx,i)=>{
       const label = d.LTX.length>1 ? `Listening Text - ${i+1}` : 'Listening Text';
       const groupName = ltx.mediaType==='AUD' ? 'Audio' : 'Video';
-      out.push(buildNewRow(header.length,idx,boolCase,label,groupName,prefix+ltx.filename));
+      out.push(buildNewRow(header.length,idx,boolCase,label,groupName,prefix+ltx.filename,{sequence:seqCounter.next()}));
       usedFilenames.add(ltx.filename);
     });
-    d.SKILL.forEach((sk,i)=>{
-      const label = d.SKILL.length>1 ? `Study Skill - ${i+1}` : 'Study Skill';
-      out.push(buildNewRow(header.length,idx,boolCase,label,'Additional Resources',prefix+sk.filename));
-      usedFilenames.add(sk.filename);
+    d.AC.forEach((ac,i)=>{
+      const label = opts.renumberSequential ? `Interactivity - ${i+1}` : `Interactivity - ${ac.num}`;
+      out.push(buildNewRow(header.length,idx,boolCase,label,'Activity',interactivityUrl(prefix,ac.filename),{sequence:seqCounter.next()}));
+      usedFilenames.add(ac.filename);
     });
     d.FUN.forEach((fw,i)=>{
       const label = d.FUN.length>1 ? `Fun with Words - ${i+1}` : 'Fun with Words';
-      out.push(buildNewRow(header.length,idx,boolCase,label,'Read aloud',prefix+fw.filename));
+      out.push(buildNewRow(header.length,idx,boolCase,label,'Read aloud',prefix+fw.filename,{sequence:seqCounter.next()}));
       usedFilenames.add(fw.filename);
     });
-    d.TM.forEach((tm,i)=>{
-      const label = d.TM.length>1 ? `Teacher Manual - ${i+1}` : 'Teacher Manual';
-      out.push(buildNewRow(header.length,idx,boolCase,label,'Teachers Manual',prefix+tm.filename,{actionEnabled:'BOTH',allowTo:'TEACHER'}));
-      usedFilenames.add(tm.filename);
+    d.SKILL.forEach((sk,i)=>{
+      const label = d.SKILL.length>1 ? `Study Skill - ${i+1}` : 'Study Skill';
+      out.push(buildNewRow(header.length,idx,boolCase,label,'Additional Resources',prefix+sk.filename,{sequence:seqCounter.next()}));
+      usedFilenames.add(sk.filename);
     });
-    d.WS.forEach((ws,i)=>{
-      const label = d.WS.length>1 ? `Worksheet - ${i+1}` : 'Worksheet';
-      out.push(buildNewRow(header.length,idx,boolCase,label,'Worksheet',prefix+ws.filename,{actionEnabled:'BOTH',allowTo:'BOTH'}));
-      usedFilenames.add(ws.filename);
-    });
+    if (!hasTeacherManual.has(chapter)){
+      d.TM.forEach((tm,i)=>{
+        const label = d.TM.length>1 ? `Teacher Manual - ${i+1}` : 'Teacher Manual';
+        out.push(buildNewRow(header.length,idx,boolCase,label,'Teachers Manual',prefix+tm.filename,{actionEnabled:'BOTH',allowTo:'TEACHER',sequence:seqCounter.next()}));
+        usedFilenames.add(tm.filename);
+      });
+    }
+    if (!hasWorksheet.has(chapter)){
+      d.WS.forEach((ws,i)=>{
+        const label = d.WS.length>1 ? `Worksheet - ${i+1}` : 'Worksheet';
+        out.push(buildNewRow(header.length,idx,boolCase,label,'Worksheet',prefix+ws.filename,{actionEnabled:'BOTH',allowTo:'BOTH',sequence:seqCounter.next()}));
+        usedFilenames.add(ws.filename);
+      });
+    }
     [...vids].forEach(v=>usedFilenames.add(v.filename));
     d.VID_RA.forEach(ra=>usedFilenames.add(ra.filename));
   }
 
-  function insertWorkBookAssetRows(out, d){
+  function insertWorkBookAssetRows(out, d, seqCounter){
     const vids = d.WB_VID;
-    if (vids.length===1) out.push(buildNewRow(header.length,idx,boolCase,'WB Animation','Animation',prefix+vids[0].filename,{isWorkBook:true}));
-    else for (const v of vids) out.push(buildNewRow(header.length,idx,boolCase,`WB Animation - ${v.num}`,'Animation',prefix+v.filename,{isWorkBook:true}));
-    for (const ra of d.WB_VID_RA) out.push(buildNewRow(header.length,idx,boolCase,'WB Read Aloud','Read aloud',prefix+ra.filename,{isWorkBook:true}));
+    if (vids.length===1) out.push(buildNewRow(header.length,idx,boolCase,'WB Animation','Animation',prefix+vids[0].filename,{isWorkBook:true,sequence:seqCounter.next()}));
+    else for (const v of vids) out.push(buildNewRow(header.length,idx,boolCase,`WB Animation - ${v.num}`,'Animation',prefix+v.filename,{isWorkBook:true,sequence:seqCounter.next()}));
+    for (const ra of d.WB_VID_RA) out.push(buildNewRow(header.length,idx,boolCase,'WB Read Aloud','Read aloud',prefix+ra.filename,{isWorkBook:true,sequence:seqCounter.next()}));
     d.WB_AC.forEach((ac,i)=>{
       const label = opts.renumberSequential ? `WB Interactivity - ${i+1}` : `WB Interactivity - ${ac.num}`;
-      out.push(buildNewRow(header.length,idx,boolCase,label,'Activity',interactivityUrl(prefix,ac.filename),{isWorkBook:true}));
+      out.push(buildNewRow(header.length,idx,boolCase,label,'Activity',interactivityUrl(prefix,ac.filename),{isWorkBook:true,sequence:seqCounter.next()}));
       usedFilenames.add(ac.filename);
     });
     vids.forEach(v=>usedFilenames.add(v.filename));
     d.WB_VID_RA.forEach(ra=>usedFilenames.add(ra.filename));
   }
 
+  function makeSeqCounter(start){
+    let n = start;
+    return { next: () => n++ };
+  }
+
   function hasWBAssets(d){ return d.WB_AC.length || d.WB_VID.length || d.WB_VID_RA.length; }
-  function hasCourseAssets(d){ return d.AC.length || d.VID.length || d.VID_RA.length || d.LTX.length || d.SKILL.length || d.FUN.length || d.TM.length || d.WS.length; }
+  function hasCourseAssets(d, chapter){
+    return d.AC.length || d.VID.length || d.VID_RA.length || d.LTX.length || d.SKILL.length || d.FUN.length
+      || (d.TM.length && !hasTeacherManual.has(chapter)) || (d.WS.length && !hasWorksheet.has(chapter));
+  }
 
   const out = [header];
   let currentChapter = null;
@@ -585,21 +604,22 @@ function mergeAssets(csvRows, byChapter, opts){
       // Chapter has no existing Course Book anchor: create one here (plus any other matched assets) if we have data for it
       if (!hasCourseBook.has(currentChapter) && !inserted.has(currentChapter)){
         const d = byChapter[currentChapter];
-        if (d && (d.PDF.length || hasCourseAssets(d) || d.WB_PDF.length || hasWBAssets(d))){
+        if (d && (d.PDF.length || hasCourseAssets(d, currentChapter) || d.WB_PDF.length || hasWBAssets(d))){
           stats.chaptersMatched++;
+          const seqCounter = makeSeqCounter(d.PDF.length ? 2 : 1);
           if (d.PDF.length){
-            out.push(buildNewRow(header.length,idx,boolCase,'Course Book',pdfGroupName,pdfPrefix+d.PDF[0].filename,{isCourseBook:true}));
+            out.push(buildNewRow(header.length,idx,boolCase,'Course Book',pdfGroupName,pdfPrefix+d.PDF[0].filename,{isCourseBook:true,sequence:1}));
             usedFilenames.add(d.PDF[0].filename);
             stats.chaptersCourseBookAdded++;
           }
-          insertChapterAssetRows(out, d);
+          insertChapterAssetRows(out, d, currentChapter, seqCounter);
           if ((d.WB_PDF.length || hasWBAssets(d)) && !hasWorkBook.has(currentChapter)){
             if (d.WB_PDF.length){
-              out.push(buildNewRow(header.length,idx,boolCase,'Work Book',pdfGroupName,wbPrefix+d.WB_PDF[0].filename,{isWorkBook:true}));
+              out.push(buildNewRow(header.length,idx,boolCase,'Work Book',pdfGroupName,wbPrefix+d.WB_PDF[0].filename,{isWorkBook:true,sequence:seqCounter.next()}));
               usedFilenames.add(d.WB_PDF[0].filename);
               stats.chaptersWorkBookAdded++;
             }
-            insertWorkBookAssetRows(out, d);
+            insertWorkBookAssetRows(out, d, seqCounter);
           }
           stats.chapterDetail[currentChapter] = { courseBookAdded: d.PDF.length>0, workBookAdded: d.WB_PDF.length>0 && !hasWorkBook.has(currentChapter), animations: d.VID.length, readAloud: d.VID_RA.length, interactivities: d.AC.length, acNums: d.AC.map(a=>a.num), wbInteractivities: d.WB_AC.length, listeningText: d.LTX.length, studySkill: d.SKILL.length, funWithWords: d.FUN.length };
           inserted.add(currentChapter);
@@ -610,16 +630,17 @@ function mergeAssets(csvRows, byChapter, opts){
     } else if ((row[idx.rowType]||'').trim()==='chapter_assets' && (row[idx.name]||'').trim()==='Course Book' && currentChapter!=null && !inserted.has(currentChapter)){
       const d = byChapter[currentChapter];
       const wbNeeded = (d && (d.WB_PDF.length || hasWBAssets(d))) && !hasWorkBook.has(currentChapter);
-      if (d && (hasCourseAssets(d) || wbNeeded)){
+      if (d && (hasCourseAssets(d, currentChapter) || wbNeeded)){
         stats.chaptersMatched++;
-        insertChapterAssetRows(out, d);
+        const seqCounter = makeSeqCounter(2);
+        insertChapterAssetRows(out, d, currentChapter, seqCounter);
         if (wbNeeded){
           if (d.WB_PDF.length){
-            out.push(buildNewRow(header.length,idx,boolCase,'Work Book',pdfGroupName,wbPrefix+d.WB_PDF[0].filename,{isWorkBook:true}));
+            out.push(buildNewRow(header.length,idx,boolCase,'Work Book',pdfGroupName,wbPrefix+d.WB_PDF[0].filename,{isWorkBook:true,sequence:seqCounter.next()}));
             usedFilenames.add(d.WB_PDF[0].filename);
             stats.chaptersWorkBookAdded++;
           }
-          insertWorkBookAssetRows(out, d);
+          insertWorkBookAssetRows(out, d, seqCounter);
         }
         stats.chapterDetail[currentChapter] = { courseBookAdded:false, workBookAdded: wbNeeded && d.WB_PDF.length>0, animations: d.VID.length, readAloud: d.VID_RA.length, interactivities: d.AC.length, acNums: d.AC.map(a=>a.num), wbInteractivities: d.WB_AC.length, listeningText: d.LTX.length, studySkill: d.SKILL.length, funWithWords: d.FUN.length };
         inserted.add(currentChapter);
